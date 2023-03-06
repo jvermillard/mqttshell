@@ -19,7 +19,7 @@ type terminalMsg struct {
 }
 
 func main() {
-	c := exec.Command("bash")
+
 	// connect to the MQTT broker
 	opts := mqtt.NewClientOptions().AddBroker("tcp://localhost:1883").SetClientID("mqttshell-server")
 	opts.SetKeepAlive(25 * time.Second)
@@ -31,8 +31,10 @@ func main() {
 		panic(token.Error())
 	}
 
-	log.Println("connected")
-	// Start the command with a pty.
+	log.Println("connected to the MQTT broker")
+
+	// Start the command with a pty attached to bash.
+	c := exec.Command("bash")
 	ptmx, err := pty.Start(c)
 	if err != nil {
 		panic(err)

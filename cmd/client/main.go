@@ -1,17 +1,20 @@
 package main
 
 import (
-	"bytes"
+	"context"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
-	"io"
 	"log"
-	"os"
+	"net/http"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
-	"golang.org/x/term"
+	"nhooyr.io/websocket"
 )
+
+//go:embed index.html
+var indexPage string
 
 type terminalMsg struct {
 	Type    string
@@ -19,6 +22,11 @@ type terminalMsg struct {
 }
 
 func main() {
+	// serve the static page
+	http.HandleFunc("/index.html", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(indexPage))
+	})
+
 	// connect to the MQTT broker
 	opts := mqtt.NewClientOptions().AddBroker("tcp://localhost:1883").SetClientID("mqttshell-client")
 	opts.SetKeepAlive(25 * time.Second)
@@ -31,12 +39,30 @@ func main() {
 
 	log.Println("connected")
 
-	// Set stdin in raw mode.
-	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
-	if err != nil {
-		panic(err)
-	}
-	defer func() { _ = term.Restore(int(os.Stdin.Fd()), oldState) }() // Best effort.
+	var cnx *websocket.Conn = nil
+	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		cnx, err = websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			panic(err)
+		}
+		// publish read input
+		for {
+			_, data, err := cnx.Read(context.TODO())
+			if err != nil {
+				panic(err)
+			}
+			hexPayload := hex.EncodeToString(data)
+
+			msg := terminalMsg{Type: "input", Payload: hexPayload}
+			mqttData, err := json.Marshal(&msg)
+			if err != nil {
+				panic(err)
+			}
+			mqttClient.Publish("mqttshell/input", 0, false, mqttData)
+
+		}
+	})
 
 	if token := mqttClient.Subscribe("mqttshell/output", 0, func(client mqtt.Client, mqttMsg mqtt.Message) {
 		if mqttMsg.Topic() != "mqttshell/output" {
@@ -44,7 +70,7 @@ func main() {
 			return
 		}
 		msg := terminalMsg{}
-		err = json.Unmarshal(mqttMsg.Payload(), &msg)
+		err := json.Unmarshal(mqttMsg.Payload(), &msg)
 		if err != nil {
 			panic(err)
 		}
@@ -53,27 +79,19 @@ func main() {
 			if err != nil {
 				panic(err)
 			}
-			_, err = io.Copy(os.Stdout, bytes.NewBuffer(data))
-			if err != nil {
-				panic(err)
+
+			if cnx != nil {
+				err = cnx.Write(context.TODO(), websocket.MessageBinary, data)
+				if err != nil {
+					panic(err)
+				}
+			} else {
+				log.Println("no websocket connection")
 			}
 		}
 	}); token.Wait() && token.Error() != nil {
-		panic(err)
+		panic(token.Error())
 	}
 
-	for {
-		buffer := make([]byte, 1024)
-		n, err := os.Stdin.Read(buffer)
-		if err != nil {
-			panic(err)
-		}
-		hexPayload := hex.EncodeToString(buffer[:n])
-		msg := terminalMsg{Type: "input", Payload: hexPayload}
-		data, err := json.Marshal(&msg)
-		if err != nil {
-			panic(err)
-		}
-		mqttClient.Publish("mqttshell/input", 0, false, data)
-	}
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }
